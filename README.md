@@ -31,10 +31,15 @@ The collected data is used to estimate the capacity and licensing model required
 
 1. Start a Cloud Shell session from the CSP UI, which should have the CLI tool, your credentials, ```git``` and ``jq`` already prepared
 2. Clone this repository, e.g. ```git clone https://github.com/cleypanw/cortex-cloud-sizing-calculator.git```
-3. ```cd pcs-sizing```
+3. ```cd cortex-cloud-sizing-calculator```
 4. ```pip install -r requirements.txt```
+
+5. Usage : 
+```cc-sizing.py [-h] [--azure] [--aws] [--gcp] [--oci] [--region-prefix REGION_PREFIX]```
+
+6. Example :
 - ```python3 cc-sizing.py --aws``` for AWS.
-- ```python3 cc-sizing.py --aws``` for AWS.
+- ```python3 cc-sizing.py --aws --region-prefix eu``` for AWS EU regions only.
 - ```python3 cc-sizing.py --azure``` for Azure.
 - ```python3 cc-sizing.py --gcp``` for GCP.
 - ```python3 cc-sizing.py --oci``` for OCI.
