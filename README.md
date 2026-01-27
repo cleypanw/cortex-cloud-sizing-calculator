@@ -292,7 +292,7 @@ ERROR: ModuleNotFoundError: No module named 'azure'
 
 ## 📝 Notes
 
-- The counts **all status** VM resources
+- The tool counts **Running/Stopped** VM resources
 - Container images benefit from a free quota (10 scans per workload)
 - For AWS, the script can scan organization accounts (assume role)
 - Container image estimates are approximate (ACR, GCR)

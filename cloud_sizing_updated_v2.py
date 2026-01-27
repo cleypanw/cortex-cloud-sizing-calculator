@@ -1,6 +1,10 @@
 import json, os, argparse, math
 import boto3, botocore
 from botocore.exceptions import ClientError
+import warnings
+
+# Supprimer les avertissements de dépréciation
+warnings.filterwarnings('ignore', category=DeprecationWarning)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--azure", "-az", help="Sizing for Azure", action='store_true')
@@ -206,8 +210,10 @@ def aws(account, session=None):
     for region in regions:
         try:
             ec2 = session.client('ec2', region_name=region)
+            # State codes: 16 = running, 80 = stopped
+            # Ne pas inclure: 0 (pending), 32 (shutting-down), 48 (terminated), 64 (stopping)
             ec2_group = ec2.describe_instances(
-                Filters=[{'Name': 'instance-state-code', 'Values': ["16"]}]
+                Filters=[{'Name': 'instance-state-code', 'Values': ["16", "80"]}]
             )['Reservations']
             
             # Count EC2 and distinguish EKS nodes
@@ -358,15 +364,16 @@ def pcs_sizing_az():
         storage_client = StorageManagementClient(credential, sub_id)
         acr_client = ContainerRegistryManagementClient(credential, sub_id)
 
-        # ------------------- VMs -------------------
+        # ------------------- VMs (Running et Stopped uniquement) -------------------
         vm_list = []
         for vm in compute_client.virtual_machines.list_all():
             try:
                 instance_view = compute_client.virtual_machines.instance_view(
                     vm.id.split('/')[4], vm.name
                 )
-                # Fix: check all statuses
-                if any('PowerState/running' in s.code for s in instance_view.statuses):
+                # Ne compter que les VMs en état running ou stopped
+                # États exclus: deallocated, deallocating, starting, stopping, unknown
+                if any('PowerState/running' in s.code or 'PowerState/stopped' in s.code for s in instance_view.statuses):
                     vm_list.append(vm.name)
             except Exception as e:
                 print(f"VM error for {vm.name}: {e}")
@@ -510,12 +517,13 @@ def pcs_sizing_gcp():
         gcp_cloudsql = []
         gcr_images = 0
 
-        # ------------------- Compute Instances -------------------
+        # ------------------- Compute Instances (Running et Stopped uniquement) -------------------
         try:
             compute_list = [
                 i.name for zone, resp in compute_v1.InstancesClient().aggregated_list(
                     compute_v1.AggregatedListInstancesRequest(project=project_id)
-                ) if resp.instances for i in resp.instances if i.status=="RUNNING"
+                ) if resp.instances for i in resp.instances 
+                if i.status in ["RUNNING", "TERMINATED"]  # TERMINATED = stopped dans GCP
             ]
         except core_exceptions.GoogleAPICallError as e:
             print(f"Compute Engine API error in {project_id}: {e}")
@@ -640,9 +648,10 @@ def pcs_sizing_oci():
     compartments_list = [{"Name":"root","Id":config['tenancy']}] + [{"Name":c.name,"Id":c.id} for c in compartments]
 
     for comp in compartments_list:
+        # Ne compter que les instances en état RUNNING ou STOPPED
         compute_count = sum(
             1 for i in compute.list_instances(compartment_id=comp['Id']).data 
-            if i.lifecycle_state=="RUNNING"
+            if i.lifecycle_state in ["RUNNING", "STOPPED"]
         )
         
         # OCI: distinguishing VMs with/without containers would require more in-depth analysis
@@ -650,7 +659,7 @@ def pcs_sizing_oci():
         vm_with_containers = 0
         
         tables({"Name": comp['Name'], "Id": comp['Id']}, [
-            ["Compute Instances", compute_count]
+            ["Compute Instances (running/stopped)", compute_count]
         ])
         
         result = licensing_count("OCI", vm_no_containers, vm_with_containers, 0, 0, 0, 0, 0, {"Name": comp['Name'], "Id": comp['Id']})
