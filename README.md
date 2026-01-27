@@ -167,7 +167,7 @@ python3 cloud_sizing_updated.py --azure --output json
 
 ```
 ============================================================
-TOTAL: 715 Cortex Cloud workload(s) (SKU) needed for Azure
+TOTAL: 971 Cortex Cloud workload(s) (SKU) needed for Azure
 ============================================================
 
 ========================================================================================================================
@@ -175,11 +175,11 @@ TOTAL: 715 Cortex Cloud workload(s) (SKU) needed for Azure
 ========================================================================================================================
 Cloud           Account/Subscription/Project ID               Account Name                        SKU       
 ------------------------------------------------------------------------------------------------------------------------
-Azure           8d7027d7-8249-474a-a2f4-c1341977d1db         EMEAL_Systems_Engineering           715       
-Azure           218f0c22-5366-444b-8897-3467ceb096ab         Shared_Services                     0         
+Azure           xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx         Sub1_prod                            715       
+Azure           xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx         Sub2_Shared_Services                 256         
 ------------------------------------------------------------------------------------------------------------------------
 
-GRAND TOTAL                                                                                       715       
+GRAND TOTAL                                                                                       971       
 ========================================================================================================================
 ```
 
