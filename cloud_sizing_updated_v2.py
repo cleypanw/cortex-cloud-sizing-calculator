@@ -12,7 +12,7 @@ parser.add_argument("--output", "-out", help="Output format (table/json)", defau
 args = parser.parse_args()
 separator = "-"*100
 
-# Nouvelles métriques de licensing basées sur l'image
+# New licensing metrics based on the image
 cc_metering = {
     "vm_no_containers": 1,           # VMs not running containers: 1 VM
     "vm_with_containers": 1,          # VMs running containers: 1 VM
@@ -20,10 +20,10 @@ cc_metering = {
     "serverless": 25,                 # Serverless Functions: 25 Functions
     "buckets": 10,                    # Cloud Buckets: 10 Buckets
     "paas_db": 2,                     # Managed Cloud Database (PaaS): 2 PaaS Databases
-    "dbaas_tb": 1,                    # DBaaS TB stored: 1 TB (non utilisé dans le calcul actuel)
+    "dbaas_tb": 1,                    # DBaaS TB stored: 1 TB (not used in current calculation)
     "saas_users": 10,                 # SaaS users: 10 SaaS Users
     "asm": 4,                         # Cloud ASM - service: 4 Unmanaged Assets
-    "container_images": 10            # Container Images in Registries: 10 scans (quota gratuit par VM/CaaS)
+    "container_images": 10            # Container Images in Registries: 10 scans (free quota per VM/CaaS)
 }
 
 cc_metering_table = [
@@ -57,12 +57,12 @@ def tables(account_info, data):
 
 def licensing_count(cloud, vm_no_containers, vm_with_containers, caas, serverless, buckets, paas_db, container_images=0, account_info=None):
     """
-    Calcule le nombre de workloads (SKU) nécessaires basé sur les nouvelles métriques
+    Calculate the number of workloads (SKU) required based on new metrics
     
-    Note: Les container images ont un quota gratuit de 10 scans par workload déployé (VM/CaaS)
-    Le calcul des images au-delà du quota gratuit n'est pas implémenté ici
+    Note: Container images have a free quota of 10 scans per deployed workload (VM/CaaS)
+    Calculation of images beyond the free quota is not implemented here
     """
-    # Calcul des workloads nécessaires pour chaque type de ressource
+    # Calculate workloads required for each resource type
     vm_no_cont_workloads = math.ceil(vm_no_containers / cc_metering["vm_no_containers"])
     vm_with_cont_workloads = math.ceil(vm_with_containers / cc_metering["vm_with_containers"])
     caas_workloads = math.ceil(caas / cc_metering["caas"])
@@ -70,7 +70,7 @@ def licensing_count(cloud, vm_no_containers, vm_with_containers, caas, serverles
     buckets_workloads = math.ceil(buckets / cc_metering["buckets"])
     paas_db_workloads = math.ceil(paas_db / cc_metering["paas_db"])
     
-    # Total des workloads
+    # Total workloads
     total = (
         vm_no_cont_workloads +
         vm_with_cont_workloads +
@@ -89,7 +89,7 @@ def licensing_count(cloud, vm_no_containers, vm_with_containers, caas, serverles
         print(f"Cloud Buckets: {buckets} → {buckets_workloads} workload(s)")
         print(f"PaaS Databases: {paas_db} → {paas_db_workloads} workload(s)")
         
-        # Info sur les container images (quota gratuit)
+        # Container images info (free quota)
         total_deployed_workloads = vm_no_containers + vm_with_containers + caas
         free_image_scans = total_deployed_workloads * 10
         print(f"\nContainer Images: {container_images} (Free quota: {free_image_scans} scans)")
@@ -122,7 +122,7 @@ def licensing_count(cloud, vm_no_containers, vm_with_containers, caas, serverles
 
 def print_global_summary(results):
     """
-    Affiche un tableau récapitulatif global avec le total des SKU par compte/souscription/projet
+    Display a global summary table with the total SKUs per account/subscription/project
     """
     if not results:
         return
@@ -142,7 +142,7 @@ def print_global_summary(results):
         account_name = result['account_name']
         sku = result['total_workloads']
         
-        # Tronquer les noms trop longs
+        # Truncate names that are too long
         account_name_display = (account_name[:32] + '...') if len(account_name) > 35 else account_name
         
         print(f"{cloud:<15} {account_id:<45} {account_name_display:<35} {sku:<10}")
@@ -152,7 +152,7 @@ def print_global_summary(results):
     
     print(f"{'-'*120}")
     
-    # Sous-totaux par cloud
+    # Subtotals by cloud
     if len(cloud_totals) > 1:
         print(f"\n{'SUBTOTALS BY CLOUD PROVIDER':^120}")
         print(f"{'-'*120}")
@@ -160,7 +160,7 @@ def print_global_summary(results):
             print(f"{cloud:<15} {'Subtotal':<80} {subtotal:<10}")
         print(f"{'-'*120}")
     
-    # Total global
+    # Grand total
     print(f"\n{'GRAND TOTAL':<95} {total_sku:<10}")
     print(f"{'='*120}\n")
     
@@ -210,7 +210,7 @@ def aws(account, session=None):
                 Filters=[{'Name': 'instance-state-code', 'Values': ["16"]}]
             )['Reservations']
             
-            # Compter EC2 et distinguer EKS nodes
+            # Count EC2 and distinguish EKS nodes
             for ec2_item in ec2_group:
                 for instance in ec2_item['Instances']:
                     tags = instance.get('Tags', [])
@@ -221,7 +221,7 @@ def aws(account, session=None):
         except botocore.exceptions.ClientError as error:
             print(f"EC2 error in {region}: {error}")
 
-        # ECS Tasks (containers managés)
+        # ECS Tasks (managed containers)
         try:
             ecs_client = session.client('ecs', region_name=region)
             clusters = ecs_client.list_clusters()['clusterArns']
@@ -258,7 +258,7 @@ def aws(account, session=None):
         except botocore.exceptions.ClientError as error:
             print(f"EFS error in {region}: {error}")
 
-    # Calcul: EC2 sans containers vs EKS (avec containers)
+    # Calculation: EC2 without containers vs EKS (with containers)
     vm_no_containers = ec2_all
     vm_with_containers = eks_all
     caas = ecs_all  # ECS running tasks
@@ -365,7 +365,7 @@ def pcs_sizing_az():
                 instance_view = compute_client.virtual_machines.instance_view(
                     vm.id.split('/')[4], vm.name
                 )
-                # Correction: vérifier tous les statuts
+                # Fix: check all statuses
                 if any('PowerState/running' in s.code for s in instance_view.statuses):
                     vm_list.append(vm.name)
             except Exception as e:
@@ -385,7 +385,7 @@ def pcs_sizing_az():
                 continue
 
         # ------------------- Azure Container Instances (ACI) -------------------
-        # Note: ACI nécessite azure.mgmt.containerinstance - non inclus ici
+        # Note: ACI requires azure.mgmt.containerinstance - not included here
         aci_count = 0
 
         # ------------------- Azure Functions -------------------
@@ -419,13 +419,13 @@ def pcs_sizing_az():
         acr_images = 0
         try:
             for registry in acr_client.registries.list():
-                # Note: compter les images nécessite l'API Docker Registry v2
-                # Pour simplifier, on compte les registries * estimation moyenne
-                acr_images += 10  # Estimation
+                # Note: counting images requires Docker Registry v2 API
+                # For simplicity, we count registries * average estimate
+                acr_images += 10  # Estimate
         except Exception as e:
             print(f"ACR error: {e}")
 
-        # Calcul des métriques
+        # Metrics calculation
         vm_no_containers = len(vm_list)
         vm_with_containers = node_count
         caas = aci_count  # Azure Container Instances
@@ -499,7 +499,7 @@ def pcs_sizing_gcp():
         project_id = p['projectId']
         project_name = p['name']
 
-        # Initialisation des compteurs
+        # Initialize counters
         compute_list = []
         node_count = 0
         gcp_functions = []
@@ -582,12 +582,12 @@ def pcs_sizing_gcp():
 
         # ------------------- GCR/Artifact Registry Images -------------------
         try:
-            # Estimation - nécessiterait l'API Artifact Registry pour un comptage précis
-            gcr_images = len(gcp_buckets) * 5  # Estimation
+            # Estimate - would require Artifact Registry API for accurate count
+            gcr_images = len(gcp_buckets) * 5  # Estimate
         except Exception as e:
             print(f"GCR error in {project_id}: {e}")
 
-        # Calcul des métriques
+        # Metrics calculation
         vm_no_containers = len(compute_list)
         vm_with_containers = node_count
         caas = len(gcp_cloudRun)
@@ -645,7 +645,7 @@ def pcs_sizing_oci():
             if i.lifecycle_state=="RUNNING"
         )
         
-        # OCI: distinction VMs avec/sans containers nécessiterait une analyse plus poussée
+        # OCI: distinguishing VMs with/without containers would require more in-depth analysis
         vm_no_containers = compute_count
         vm_with_containers = 0
         
