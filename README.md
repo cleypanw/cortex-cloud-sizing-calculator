@@ -123,29 +123,29 @@ key_file=~/.oci/oci_api_key.pem
 
 ```bash
 # AWS - All organization accounts
-python3 cloud_sizing_updated.py --aws
+python3 cloud_sizing_updated_v2.py --aws
 
 # AWS - Filter by region (e.g., us-*, eu-*, ap-*)
-python3 cloud_sizing_updated.py --aws --region-prefix us
+python3 cloud_sizing_updated_v2.py --aws --region-prefix us
 
 # Azure - All subscriptions
-python3 cloud_sizing_updated.py --azure
+python3 cloud_sizing_updated_v2.py --azure
 
 # GCP - All projects
-python3 cloud_sizing_updated.py --gcp
+python3 cloud_sizing_updated_v2.py --gcp
 
 # OCI - All compartments
-python3 cloud_sizing_updated.py --oci
+python3 cloud_sizing_updated_v2.py --oci
 ```
 
 ### Output Formats
 
 ```bash
 # Table format (default)
-python3 cloud_sizing_updated.py --azure
+python3 cloud_sizing_updated_v2.py --azure
 
 # JSON format
-python3 cloud_sizing_updated.py --azure --output json
+python3 cloud_sizing_updated_v2.py --azure --output json
 ```
 
 ## 📊 Cortex Cloud Licensing Metrics
@@ -314,7 +314,7 @@ ERROR: ModuleNotFoundError: No module named 'azure'
 ### Automation
 ```bash
 # Schedule daily runs with cron
-0 2 * * * /usr/bin/python3 /path/to/cloud_sizing_updated.py --azure --output json > /var/log/sizing_$(date +\%Y\%m\%d).json
+0 2 * * * /usr/bin/python3 /path/to/cloud_sizing_updated_v2.py --azure --output json > /var/log/sizing_$(date +\%Y\%m\%d).json
 ```
 
 ## 🔄 Multi-Cloud Usage
@@ -323,15 +323,15 @@ To scan multiple cloud providers in sequence:
 
 ```bash
 # Scan all configured clouds
-python3 cloud_sizing_updated.py --aws
-python3 cloud_sizing_updated.py --azure
-python3 cloud_sizing_updated.py --gcp
-python3 cloud_sizing_updated.py --oci
+python3 cloud_sizing_updated_v2.py --aws
+python3 cloud_sizing_updated_v2.py --azure
+python3 cloud_sizing_updated_v2.py --gcp
+python3 cloud_sizing_updated_v2.py --oci
 
 # Or create a wrapper script
 #!/bin/bash
 for cloud in aws azure gcp oci; do
-    python3 cloud_sizing_updated.py --${cloud} --output json > ${cloud}_sizing.json
+    python3 cloud_sizing_updated_v2.py --${cloud} --output json > ${cloud}_sizing.json
 done
 ```
 
