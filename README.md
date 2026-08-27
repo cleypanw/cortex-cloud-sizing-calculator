@@ -650,6 +650,28 @@ A venv is **not relocatable** — `venv/bin/activate` hardcodes its own path. If
 you moved or renamed the directory, delete `venv` and let the script recreate
 it rather than trying to repair it.
 
+### Installed but unusable (Cloud Shell, shared images)
+
+```
+AttributeError: module 'lib' has no attribute 'GEN_EMAIL'
+  ... OpenSSL/crypto.py, imported from oauth2client, from googleapiclient
+```
+
+A stale `pyOpenSSL` in `~/.local` shadowing the system one and no longer
+matching its `cryptography`. Nothing to do with this script, but it breaks any
+`googleapiclient` import — so `--gcp-mode project` dies on it.
+
+The preflight detects it (it imports each module for real rather than only
+checking that the file exists) and offers a virtualenv, which ignores
+`~/.local` entirely and is the reliable way out. Accept the prompt, or:
+
+```bash
+python3 -m pip install --user --upgrade pyOpenSSL cryptography
+```
+
+Note that `--gcp-mode asset` never touches `googleapiclient` at all, so an
+organisation scan is unaffected.
+
 ```bash
 # Permission denied (only when installing manually)
 ERROR: Could not install packages due to an OSError: [Errno 13] Permission denied

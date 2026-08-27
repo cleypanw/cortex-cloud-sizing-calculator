@@ -279,6 +279,11 @@ def licensing_count(cloud, vm_no_containers, vm_with_containers, caas, serverles
     }
 
 
+def _rank_key(row):
+    """Biggest first, then by id so two runs of the same estate produce identical files."""
+    return (-row["total_workloads"], str(row["account_id"]))
+
+
 CSV_COLUMNS = ["cloud", "account_id", "account_name", "vm_no_containers", "vm_with_containers",
                "caas", "serverless", "buckets", "paas_db", "container_images", "total_workloads"]
 
@@ -288,7 +293,7 @@ def write_csv(results):
     try:
         writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS, extrasaction="ignore")
         writer.writeheader()
-        for r in sorted(results, key=lambda x: x["total_workloads"], reverse=True):
+        for r in sorted(results, key=_rank_key):
             writer.writerow(r)
     finally:
         if args.csv_file:
@@ -305,7 +310,7 @@ def print_global_summary(results):
         print("\nNo account/subscription/project returned any data.")
         return 0
 
-    ranked = sorted(results, key=lambda r: r["total_workloads"], reverse=True)
+    ranked = sorted(results, key=_rank_key)
     limit = len(ranked) if args.top <= 0 else min(args.top, len(ranked))
     empty = sum(1 for r in ranked if r["total_workloads"] == 0)
 
@@ -1367,15 +1372,30 @@ def dependency_key(cloud):
 
 
 def missing_imports(key):
-    import importlib.util
-    missing = []
+    """
+    Probe by ACTUALLY importing each module.
+
+    find_spec() only proves a file is on disk; it never executes it. A package
+    can be present and still explode on import -- typically a stale pyOpenSSL in
+    ~/.local shadowing the system one and no longer matching its cryptography
+    ("module 'lib' has no attribute 'GEN_EMAIL'"), which happens on shared
+    images such as Cloud Shell. Catching that here costs a couple of seconds and
+    saves a traceback thirty seconds into the scan.
+
+    Returns (missing, broken):
+      missing  not installed          -> install it
+      broken   installed but unusable -> needs a clean environment
+    """
+    import importlib
+    missing, broken = [], []
     for module in IMPORT_PROBES[key]:
         try:
-            if importlib.util.find_spec(module) is None:
-                missing.append(module)
-        except (ImportError, ValueError):
+            importlib.import_module(module)
+        except ImportError:                      # includes ModuleNotFoundError
             missing.append(module)
-    return missing
+        except Exception as e:                   # version conflict, broken C ext, ...
+            broken.append(f"{module}: {type(e).__name__}: {e}")
+    return missing, broken
 
 
 def venv_python(venv_dir):
@@ -1398,17 +1418,25 @@ def ensure_dependencies(cloud):
 
     key = dependency_key(cloud)
     step("Dependencies")
-    missing = missing_imports(key)
-    if not missing:
+    missing, broken = missing_imports(key)
+    if not missing and not broken:
         ok(f"{len(IMPORT_PROBES[key])} module(s) available for {key}")
         return
 
-    info(f"missing for {key}: {', '.join(missing)}")
+    if missing:
+        info(f"missing for {key}: {', '.join(missing)}")
+    if broken:
+        info(f"installed but unusable for {key}:")
+        for detail in broken:
+            info(f"  {detail}")
+        info("a package in this environment conflicts with another (often a stale")
+        info("~/.local install shadowing the system one)")
     packages = DEPENDENCIES[key]
 
     if args.no_bootstrap:
-        fail("Dependencies are missing and --no-bootstrap was given. Install them with:\n"
-             f"     python3 -m pip install {' '.join(packages)}")
+        fail(("Dependencies are broken" if broken else "Dependencies are missing") +
+             " and --no-bootstrap was given. Fix with:\n"
+             f"     python3 -m pip install --upgrade {' '.join(packages)}")
 
     in_venv = sys.prefix != sys.base_prefix
     already_tried = os.environ.get(_BOOTSTRAP_MARKER) == "1"
@@ -1416,6 +1444,24 @@ def ensure_dependencies(cloud):
     if in_venv:
         target_python = sys.executable
         info(f"installing into the active virtualenv ({sys.prefix})")
+    elif broken:
+        # Installing next to the broken copy would not help: ~/.local keeps
+        # priority. A venv ignores user site-packages entirely (PEP 405), so it
+        # is the only reliable escape from a poisoned ambient environment.
+        info("a virtualenv ignores ~/.local, which is what makes this recoverable")
+        venv_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv")
+        target_python = venv_python(venv_dir)
+        if not os.path.exists(target_python):
+            if not ask(f"Create a clean virtualenv in {venv_dir}?", default_yes=True):
+                fail("Cannot continue in this environment. Either repair it:\n"
+                     f"     python3 -m pip install --user --upgrade {' '.join(packages)}\n"
+                     "     or create a virtualenv yourself and run the script from it.")
+            info(f"creating {venv_dir} ...")
+            try:
+                subprocess.run([sys.executable, "-m", "venv", venv_dir], check=True)
+            except (subprocess.CalledProcessError, OSError) as e:
+                fail(f"could not create the virtualenv: {e}\n"
+                     "     On Debian/Ubuntu you may need:  sudo apt install python3-venv")
     else:
         venv_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv")
         target_python = venv_python(venv_dir)
@@ -1432,8 +1478,9 @@ def ensure_dependencies(cloud):
                      "     On Debian/Ubuntu you may need:  sudo apt install python3-venv")
 
     if already_tried:
-        fail("Dependencies are still missing after a bootstrap attempt.\n"
-             f"     Try manually: {target_python} -m pip install {' '.join(packages)}")
+        fail("Dependencies are still not usable after a bootstrap attempt.\n"
+             f"     Try manually: {target_python} -m pip install --upgrade {' '.join(packages)}\n"
+             "     If a module is 'installed but unusable', delete ./venv and retry.")
 
     info(f"installing {', '.join(packages)} (this takes ~30s) ...")
     code, _out, err = run_cmd([target_python, "-m", "pip", "install", "--quiet",
