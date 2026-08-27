@@ -15,6 +15,7 @@ import argparse
 import atexit
 import csv
 import json
+import logging
 import math
 import os
 import re
@@ -35,6 +36,13 @@ warnings.filterwarnings('ignore', category=DeprecationWarning)
 os.environ.setdefault("GRPC_VERBOSITY", "NONE")
 os.environ.setdefault("GRPC_ENABLE_FORK_SUPPORT", "0")
 os.environ.setdefault("ABSL_LOGGING_MIN_LOG_LEVEL", "3")
+
+# googleapiclient logs "httplib2 transport does not support per-request timeout"
+# once per discovery-built client. Two per project is 90 000 lines on a large
+# estate, and it says nothing actionable: real API problems go through
+# record_api_failure() instead.
+logging.getLogger("googleapiclient").setLevel(logging.ERROR)
+logging.getLogger("googleapiclient.discovery_cache").setLevel(logging.ERROR)
 
 parser = argparse.ArgumentParser(
     formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1289,6 +1297,7 @@ IMPORT_PROBES = {
 }
 
 _BOOTSTRAP_MARKER = "CORTEX_SIZING_BOOTSTRAPPED"
+_HANDOVER_MARKER = "CORTEX_SIZING_HANDED_OVER"
 _COLOR = sys.stderr.isatty()
 
 
@@ -1444,38 +1453,39 @@ def ensure_dependencies(cloud):
     if in_venv:
         target_python = sys.executable
         info(f"installing into the active virtualenv ({sys.prefix})")
-    elif broken:
-        # Installing next to the broken copy would not help: ~/.local keeps
-        # priority. A venv ignores user site-packages entirely (PEP 405), so it
-        # is the only reliable escape from a poisoned ambient environment.
-        info("a virtualenv ignores ~/.local, which is what makes this recoverable")
-        venv_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv")
-        target_python = venv_python(venv_dir)
-        if not os.path.exists(target_python):
-            if not ask(f"Create a clean virtualenv in {venv_dir}?", default_yes=True):
-                fail("Cannot continue in this environment. Either repair it:\n"
-                     f"     python3 -m pip install --user --upgrade {' '.join(packages)}\n"
-                     "     or create a virtualenv yourself and run the script from it.")
-            info(f"creating {venv_dir} ...")
-            try:
-                subprocess.run([sys.executable, "-m", "venv", venv_dir], check=True)
-            except (subprocess.CalledProcessError, OSError) as e:
-                fail(f"could not create the virtualenv: {e}\n"
-                     "     On Debian/Ubuntu you may need:  sudo apt install python3-venv")
     else:
+        # Installing next to a broken copy would not help: ~/.local keeps priority.
+        # A venv ignores user site-packages entirely (PEP 405), so it is the only
+        # reliable escape from a poisoned ambient environment.
+        if broken:
+            info("a virtualenv ignores ~/.local, which is what makes this recoverable")
         venv_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv")
         target_python = venv_python(venv_dir)
-        if not os.path.exists(target_python):
-            if not ask(f"Create a virtualenv in {venv_dir} and install "
-                       f"{len(packages)} package(s)?", default_yes=True):
-                fail("Cannot continue without the SDKs. Install them yourself with:\n"
-                     f"     python3 -m pip install {' '.join(packages)}")
-            info(f"creating {venv_dir} ...")
-            try:
-                subprocess.run([sys.executable, "-m", "venv", venv_dir], check=True)
-            except (subprocess.CalledProcessError, OSError) as e:
-                fail(f"could not create the virtualenv: {e}\n"
-                     "     On Debian/Ubuntu you may need:  sudo apt install python3-venv")
+        handed_over = os.environ.get(_HANDOVER_MARKER) == "1"
+        if os.path.exists(target_python) and not handed_over:
+            # The venv is already there from a previous run. Hand over immediately
+            # rather than reinstalling: the child re-probes in the clean
+            # environment and installs only what it actually lacks. Without this,
+            # every invocation paid ~30s of pip for nothing.
+            # The marker stops a second handover if that python is not a real venv.
+            info(f"reusing {venv_dir}")
+            info("restarting in the prepared environment ...")
+            env = dict(os.environ, **{_HANDOVER_MARKER: "1"})
+            result = subprocess.run([target_python, os.path.abspath(__file__), *sys.argv[1:]],
+                                    env=env)
+            sys.exit(result.returncode)
+        question = (f"Create a clean virtualenv in {venv_dir}?" if broken else
+                    f"Create a virtualenv in {venv_dir} and install {len(packages)} package(s)?")
+        if not ask(question, default_yes=True):
+            fail("Cannot continue in this environment. Either repair it:\n"
+                 f"     python3 -m pip install --user --upgrade {' '.join(packages)}\n"
+                 "     or create a virtualenv yourself and run the script from it.")
+        info(f"creating {venv_dir} ...")
+        try:
+            subprocess.run([sys.executable, "-m", "venv", venv_dir], check=True)
+        except (subprocess.CalledProcessError, OSError) as e:
+            fail(f"could not create the virtualenv: {e}\n"
+                 "     On Debian/Ubuntu you may need:  sudo apt install python3-venv")
 
     if already_tried:
         fail("Dependencies are still not usable after a bootstrap attempt.\n"
