@@ -37,12 +37,24 @@ os.environ.setdefault("GRPC_VERBOSITY", "NONE")
 os.environ.setdefault("GRPC_ENABLE_FORK_SUPPORT", "0")
 os.environ.setdefault("ABSL_LOGGING_MIN_LOG_LEVEL", "3")
 
-# googleapiclient logs "httplib2 transport does not support per-request timeout"
-# once per discovery-built client. Two per project is 90 000 lines on a large
-# estate, and it says nothing actionable: real API problems go through
-# record_api_failure() instead.
-logging.getLogger("googleapiclient").setLevel(logging.ERROR)
-logging.getLogger("googleapiclient.discovery_cache").setLevel(logging.ERROR)
+# "httplib2 transport does not support per-request timeout" is emitted once per
+# request by google_auth_httplib2 (NOT by googleapiclient, despite the wording).
+# Four per project is 180 000 lines on a large estate, and it says nothing
+# actionable: real API problems go through record_api_failure() instead.
+# The emitting module has moved between releases, so silence the whole family
+# rather than betting on one name.
+for _noisy in ("google_auth_httplib2", "googleapiclient", "googleapiclient.discovery_cache",
+               "oauth2client", "httplib2", "google.auth.transport.requests"):
+    logging.getLogger(_noisy).setLevel(logging.ERROR)
+
+# Belt and braces: nothing configures logging here, so any WARNING from a
+# library we did not name above reaches stderr through logging.lastResort and
+# lands in the middle of the report. Drop that one message wherever it fires.
+class _DropPerRequestTimeout(logging.Filter):
+    def filter(self, record):
+        return "does not support per-request timeout" not in record.getMessage()
+
+logging.lastResort.addFilter(_DropPerRequestTimeout())
 
 parser = argparse.ArgumentParser(
     formatter_class=argparse.RawDescriptionHelpFormatter,
