@@ -131,6 +131,16 @@ docker-compose.override.yml
 *.bz2
 
 # ========================
+# Cloud sizing tool artefacts
+# ========================
+# Leftover-dataset tracker written by --gcp-mode bq
+.cortex_sizing_bq_state.json
+# Scan outputs
+sizing*.csv
+sizing*.json
+*.jsonl
+
+# ========================
 # Miscellaneous
 # ========================
 *.log
