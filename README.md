@@ -121,7 +121,7 @@ Copy-paste this into a mail or chat, replacing `<ORG_ID>`, `<REPO_URL>` and
 >
 > ```bash
 > python3 cloud_sizing_updated_v2.py --gcp --gcp-scope organizations/<ORG_ID> \
->     --output csv --csv-file sizing-org.csv
+>     --csv-file sizing-org.csv
 > ```
 >
 > It reads Cloud Asset Inventory, the inventory Google already maintains for
@@ -286,25 +286,49 @@ python3 cloud_sizing_updated_v2.py --oci
 ### Output Formats
 
 ```bash
-# Table format (default) - shows the top 25 accounts by SKU + the grand total
+# Table format (default) - estate-wide ASSET totals only, no SKU
 python3 cloud_sizing_updated_v2.py --azure
 
-# Full table, no truncation
-python3 cloud_sizing_updated_v2.py --azure --top 0
+# Same, plus the global billable units for both Cortex Cloud packages
+python3 cloud_sizing_updated_v2.py --azure --show-sku
 
-# Per-account service-by-service breakdown (verbose; off by default at scale)
+# Add the per-account asset table (top 25 by asset count; --top 0 for all)
 python3 cloud_sizing_updated_v2.py --azure --details
 
-# JSON format
+# Per-account service-by-service breakdown (very verbose at scale)
+python3 cloud_sizing_updated_v2.py --azure --details --top 0
+
+# JSON format: {"accounts": [...], "asset_totals": {...}, "sku": {...}}
 python3 cloud_sizing_updated_v2.py --azure --output json
 
 # CSV - recommended when there are hundreds/thousands of accounts
 python3 cloud_sizing_updated_v2.py --gcp --gcp-scope organizations/123456789 \
-    --output csv --csv-file sizing.csv
+    --csv-file sizing.csv
 ```
 
 Progress messages and errors go to **stderr**, results to **stdout**, so
 `--output json > out.json` and `--output csv` are always machine-readable.
+
+### Where the SKUs are, and why they are global
+
+The screen shows **assets**. The **billable units** live in the CSV footer, or
+on screen with `--show-sku`.
+
+The metering divisors are applied **once, on the estate-wide totals** — never
+per account. That matters on organisations with thousands of small projects: a
+project holding 3 serverless functions is 3/25 of a unit, not a whole one.
+Rounding up per project would have made the rounding, rather than the workload,
+drive the quote (on a 4 000-project estate the gap runs into thousands of units).
+
+CSV layout:
+
+| Section | Content |
+|---|---|
+| data rows | one row per account/subscription/project, **raw asset counts**, no SKU |
+| `== TOTAL ASSETS ==` | estate-wide total for each category |
+| `== METERING DIVISOR ==` | assets per billable unit |
+| `== SKU posture ==` | billable units, Cloud Posture Security |
+| `== SKU runtime ==` | billable units, Cloud Runtime Security |
 
 ### Preflight and environment
 
@@ -465,44 +489,71 @@ python3 cloud_sizing_updated_v2.py --gcp --gcp-mode project --checkpoint scan.js
 
 ## 📊 Cortex Cloud Licensing Metrics
 
-| Workload Type                    | Billable Units                |
-|----------------------------------|-------------------------------|
-| VMs not running containers       | 1 VM                          |
-| VMs running containers           | 1 VM                          |
-| CaaS                             | 10 Managed Containers         |
-| Serverless Functions             | 25 Serverless Functions       |
-| Cloud Buckets                    | 10 Cloud Buckets              |
-| Managed Cloud Database (PaaS)    | 2 PaaS Databases              |
-| DBaaS TB stored                  | 1 TB Stored                   |
-| SaaS users                       | 10 SaaS Users                 |
-| Cloud ASM - service              | 4 Unmanaged Assets            |
-| Container Images in Registries   | Free: 10 scans per workload   |
+| Workload Type                    | Billable Units                | Package             |
+|----------------------------------|-------------------------------|---------------------|
+| VMs not running containers       | 1 VM                          | Posture + Runtime   |
+| VMs running containers           | 1 VM                          | Posture + Runtime   |
+| CaaS                             | 10 Managed Containers         | **Runtime only**    |
+| Serverless Functions             | 25 Serverless Functions       | Posture + Runtime   |
+| Cloud Buckets                    | 10 Cloud Buckets              | Posture + Runtime   |
+| Managed Cloud Database (PaaS)    | 2 PaaS Databases              | Posture + Runtime   |
+| DBaaS TB stored                  | 1 TB Stored                   | not collected       |
+| SaaS users                       | 10 SaaS Users                 | not collected       |
+| Cloud ASM - service              | 4 Unmanaged Assets            | not collected       |
+| Container Images in Registries   | Free: 10 scans per workload   | free                |
+
+**CaaS is metered by Cloud Runtime Security only.** Cloud Posture Security does
+not bill Managed Containers, so the tool reports two totals side by side. The
+split lives in `CC_PACKAGES` in the script — one line to edit if the packaging
+changes.
 
 ## 📈 Sample Output
 
+Default screen output — assets only:
+
 ```
-============================================================
-TOTAL: 971 Cortex Cloud workload(s) (SKU) needed for Azure
-============================================================
-
 ========================================================================================================================
-                              GLOBAL SKU SUMMARY - ALL ACCOUNTS/SUBSCRIPTIONS/PROJECTS                                
+                       GLOBAL ASSET SUMMARY - ALL ACCOUNTS/SUBSCRIPTIONS/PROJECTS
 ========================================================================================================================
-Cloud           Account/Subscription/Project ID               Account Name                        SKU       
-------------------------------------------------------------------------------------------------------------------------
-Azure           xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx         Sub1_prod                            715       
-Azure           xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx         Sub2_Shared_Services                 256         
-------------------------------------------------------------------------------------------------------------------------
 
-Accounts scanned                                                                                  2         
-Accounts with 0 SKU                                                                               0         
-GRAND TOTAL                                                                                       971       
+Asset Category                                                   Assets
+------------------------------------------------------------------------------------------------------------------------
+VMs not running containers                                        9 223
+VMs running containers                                                0
+CaaS (Managed Containers)                                        31 328
+Serverless Functions                                             60 001
+Cloud Buckets                                                   136 341
+Managed Cloud Databases (PaaS)                                  129 071
+------------------------------------------------------------------------------------------------------------------------
+Accounts/subscriptions/projects scanned                           4 231
+  of which empty (0 asset)                                          118
+GRAND TOTAL ASSETS                                              365 964
+========================================================================================================================
+Billable units per Cortex Cloud package: see the footer of sizing-org.csv (or re-run with --show-sku).
+```
+
+With `--show-sku`:
+
+```
+========================================================================================================================
+              GLOBAL BILLABLE UNITS (SKU) - COMPUTED ON ESTATE-WIDE TOTALS, NOT PER ACCOUNT
+========================================================================================================================
+Asset Category                                 Assets   Divisor     Cloud Posture Security     Cloud Runtime Security
+------------------------------------------------------------------------------------------------------------------------
+VMs not running containers                      9 223         1                      9 223                      9 223
+VMs running containers                              0         1                          0                          0
+CaaS (Managed Containers)                      31 328        10                not metered                      3 133
+Serverless Functions                           60 001        25                      2 401                      2 401
+Cloud Buckets                                 136 341        10                     13 635                     13 635
+Managed Cloud Databases (PaaS)                129 071         2                     64 536                     64 536
+------------------------------------------------------------------------------------------------------------------------
+TOTAL BILLABLE UNITS                                                                89 795                     92 928
 ========================================================================================================================
 ```
 
-Rows are sorted by SKU descending and truncated to `--top` (default 25); the
-grand total always covers every account. Use `--top 0` or `--output csv` for the
-full list.
+Add `--details` for the per-account asset table; it is sorted by asset count
+descending and truncated to `--top` (default 25). The totals always cover every
+account. Use `--top 0` or `--csv-file` for the full list.
 
 ## 🔍 Resources Counted by CSP
 
@@ -697,6 +748,8 @@ older quote.
 
 | Fix | Effect |
 |-----|--------|
+| **SKUs were rounded up per account/project, then summed.** Now the divisors are applied once on the estate-wide totals. | **Large over-count fixed on estates with many small projects** — thousands of units on a 4 000-project org |
+| **CaaS was billed in every package.** It is metered by Cloud Runtime Security only; the tool now reports Posture and Runtime separately. | Posture quotes drop by the CaaS line |
 | **GCP: GKE nodes were counted twice** — once as Compute Instances, once via `currentNodeCount`. Now split on the `goog-gke-node` label. | Over-count removed; can be large on GKE-heavy estates |
 | **GCP: `GCR images = buckets × 5`** was a fabricated number. Now reports "not collected" unless `--count-images` (real Artifact Registry count). | No more invented figures |
 | **GCP: Cloud Functions gen2** were counted twice (as a function *and* as the Cloud Run service backing it). Now deduplicated on `goog-managed-by=cloudfunctions`. | Over-count removed |
@@ -771,7 +824,8 @@ import json
 with open('azure_sizing.json') as f:
     data = json.load(f)
 
-df = pd.DataFrame(data)
+df = pd.DataFrame(data['accounts'])   # per-account asset counts
+# data['asset_totals'] and data['sku'] hold the estate-wide figures
 df.to_excel('azure_sizing_report.xlsx', index=False)
 ```
 

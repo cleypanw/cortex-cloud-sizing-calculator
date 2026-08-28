@@ -2,7 +2,13 @@
 """
 Cortex Cloud sizing calculator.
 
-Counts billable workloads (SKU) across AWS, Azure, GCP and OCI.
+Counts cloud assets across AWS, Azure, GCP and OCI, and turns them into Cortex
+Cloud billable units (SKU).
+
+Assets are reported per account/subscription/project (CSV) but the metering
+divisors are applied ONCE on the estate-wide totals, never per account -- see
+global_sku(). Units are given for both packages, because Cloud Posture Security
+does not meter CaaS while Cloud Runtime Security does.
 
 GCP supports three collection modes (see --gcp-mode):
   project  per-project API calls (original behaviour, now parallel + resumable)
@@ -67,6 +73,14 @@ Large GCP organisations (thousands of projects)
   Uses Cloud Asset Inventory. Read-only, creates no resource in the tenant.
   Needs: roles/cloudasset.viewer on the scope, and cloudasset.googleapis.com
   enabled on the quota project (an API enablement, not a resource).
+
+Reading the output
+------------------
+  screen     estate-wide ASSET totals only (add --details for the per-account
+             table, --show-sku for the billable units)
+  CSV        one row of raw asset counts per account/subscription/project, then
+             a footer with the estate totals and the SKU per Cortex package
+  SKUs       always computed on the estate-wide totals, never per account
 """)
 parser.add_argument("--azure", "-az", help="Sizing for Azure", action='store_true')
 parser.add_argument("--aws", "-a", help="Sizing for AWS", action='store_true')
@@ -75,8 +89,10 @@ parser.add_argument("--oci", "-o", help="Sizing for OCI", action='store_true')
 parser.add_argument("--region-prefix", "-rp", help="Filter AWS regions by prefix (e.g. us, eu, ap)", default=None)
 parser.add_argument("--output", "-out", help="Output format", default="table", choices=["table", "json", "csv"])
 parser.add_argument("--csv-file", help="Write the full per-account CSV here (default: stdout)", default=None)
-parser.add_argument("--details", help="Print the per-account breakdown even on large estates", action='store_true')
-parser.add_argument("--top", help="Rows shown in the table summary (0 = all)", type=int, default=25)
+parser.add_argument("--details", help="Also print the per-account asset table on screen", action='store_true')
+parser.add_argument("--top", help="Rows shown by --details (0 = all)", type=int, default=25)
+parser.add_argument("--show-sku", help="Also print the global SKU totals on screen (always in the CSV footer)",
+                    action='store_true')
 parser.add_argument("--workers", "-w", help="Parallel workers for scans", type=int, default=16)
 parser.add_argument("--count-images", help="Count container registry images (slow, informational only)",
                     action='store_true')
@@ -196,17 +212,37 @@ cc_metering = {
     "container_images": 10            # Container Images in Registries: 10 scans (free quota per VM/CaaS)
 }
 
+# The asset categories this tool actually collects, in report order.
+# (key, human label) -- the divisor for each one lives in cc_metering above.
+ASSET_CATEGORIES = [
+    ("vm_no_containers", "VMs not running containers"),
+    ("vm_with_containers", "VMs running containers"),
+    ("caas", "CaaS (Managed Containers)"),
+    ("serverless", "Serverless Functions"),
+    ("buckets", "Cloud Buckets"),
+    ("paas_db", "Managed Cloud Databases (PaaS)"),
+]
+
+# Cortex Cloud is sold as packages, and they do not meter the same categories.
+# CaaS (Managed Containers) is billed by Cloud Runtime Security only; Cloud
+# Posture Security ignores it entirely. Everything else is common to both.
+# One entry per package: categories listed here are NOT billed by that package.
+CC_PACKAGES = [
+    ("posture", "Cloud Posture Security", {"caas"}),
+    ("runtime", "Cloud Runtime Security", set()),
+]
+
 cc_metering_table = [
-    ["VMs not running containers", "1 VM"],
-    ["VMs running containers", "1 VM"],
-    ["CaaS", "10 Managed Containers"],
-    ["Serverless Functions", "25 Serverless Functions"],
-    ["Cloud Buckets", "10 Cloud Buckets"],
-    ["Managed Cloud Database (PaaS)", "2 PaaS Databases"],
-    ["DBaaS TB stored", "1 TB Stored"],
-    ["SaaS users", "10 SaaS Users"],
-    ["Cloud ASM - service", "4 Unmanaged Assets"],
-    ["Container Images in Registries", "Free quota: 10 container image scans per deployed workload (VM/CaaS)"]
+    ["VMs not running containers", "1 VM", "Posture + Runtime"],
+    ["VMs running containers", "1 VM", "Posture + Runtime"],
+    ["CaaS", "10 Managed Containers", "Runtime only"],
+    ["Serverless Functions", "25 Serverless Functions", "Posture + Runtime"],
+    ["Cloud Buckets", "10 Cloud Buckets", "Posture + Runtime"],
+    ["Managed Cloud Database (PaaS)", "2 PaaS Databases", "Posture + Runtime"],
+    ["DBaaS TB stored", "1 TB Stored", "not collected"],
+    ["SaaS users", "10 SaaS Users", "not collected"],
+    ["Cloud ASM - service", "4 Unmanaged Assets", "not collected"],
+    ["Container Images in Registries", "Free quota: 10 scans per deployed workload (VM/CaaS)", "free"]
 ]
 
 
@@ -214,9 +250,9 @@ def cortex_cloud_metering():
     if args.output != "table":
         return
     print(f"\n{separator}\nCortex Cloud Workload Metering\n{separator}")
-    print(f"{'Workload Type':<45} {'Billable Units':<50}\n{separator}")
-    for workload, units in cc_metering_table:
-        print(f"{workload:<45} {units:<50}")
+    print(f"{'Workload Type':<32} {'Billable Units':<52} {'Package':<20}\n{separator}")
+    for workload, units, package in cc_metering_table:
+        print(f"{workload:<32} {units:<52} {package:<20}")
     print(separator)
 
 
@@ -233,170 +269,248 @@ def tables(account_info, data):
 def licensing_count(cloud, vm_no_containers, vm_with_containers, caas, serverless, buckets, paas_db,
                     container_images=0, account_info=None):
     """
-    Calculate the number of workloads (SKU) required based on new metrics
+    Record the RAW asset counts for one account/subscription/project.
 
-    Note: Container images have a free quota of 10 scans per deployed workload (VM/CaaS)
-    Calculation of images beyond the free quota is not implemented here.
-    container_images may be None, meaning "not collected" (never a fabricated estimate).
+    No SKU is computed here on purpose. Cortex meters the tenant, not the
+    project, so the metering divisors are applied once on the estate-wide
+    totals (see global_sku). Rounding up per account instead would bill a
+    project with 3 functions a full unit rather than 3/25 of one -- on an
+    organisation with thousands of small projects that rounding, not the
+    workload, ends up driving the quote.
+
+    container_images may be None, meaning "not collected" (never a fabricated
+    estimate). Images have a free quota of 10 scans per deployed workload
+    (VM/CaaS); billing beyond that quota is not modelled here.
     """
-    # Calculate workloads required for each resource type
-    vm_no_cont_workloads = math.ceil(vm_no_containers / cc_metering["vm_no_containers"])
-    vm_with_cont_workloads = math.ceil(vm_with_containers / cc_metering["vm_with_containers"])
-    caas_workloads = math.ceil(caas / cc_metering["caas"])
-    serverless_workloads = math.ceil(serverless / cc_metering["serverless"])
-    buckets_workloads = math.ceil(buckets / cc_metering["buckets"])
-    paas_db_workloads = math.ceil(paas_db / cc_metering["paas_db"])
-
-    # Total workloads
-    total = (
-        vm_no_cont_workloads +
-        vm_with_cont_workloads +
-        caas_workloads +
-        serverless_workloads +
-        buckets_workloads +
-        paas_db_workloads
-    )
-
-    if args.output == "table" and args.details:
-        print(f"\n--- Licensing Breakdown ---")
-        print(f"VMs (no containers): {vm_no_containers} → {vm_no_cont_workloads} workload(s)")
-        print(f"VMs (with containers): {vm_with_containers} → {vm_with_cont_workloads} workload(s)")
-        print(f"CaaS: {caas} → {caas_workloads} workload(s)")
-        print(f"Serverless: {serverless} → {serverless_workloads} workload(s)")
-        print(f"Cloud Buckets: {buckets} → {buckets_workloads} workload(s)")
-        print(f"PaaS Databases: {paas_db} → {paas_db_workloads} workload(s)")
-
-        # Container images info (free quota)
-        total_deployed_workloads = vm_no_containers + vm_with_containers + caas
-        free_image_scans = total_deployed_workloads * 10
-        shown = "not collected (use --count-images)" if container_images is None else container_images
-        print(f"\nContainer Images: {shown} (Free quota: {free_image_scans} scans)")
-
-        print(f"\n{'=' * 60}")
-        print(f"TOTAL: {total} Cortex Cloud workload(s) (SKU) needed for {cloud}")
-        print(f"{'=' * 60}\n{separator}")
-
-    return {
-        "cloud": cloud,
-        "account_id": account_info["Id"] if account_info else "N/A",
-        "account_name": account_info["Name"] if account_info else "N/A",
+    counts = {
         "vm_no_containers": vm_no_containers,
         "vm_with_containers": vm_with_containers,
         "caas": caas,
         "serverless": serverless,
         "buckets": buckets,
         "paas_db": paas_db,
-        "container_images": container_images,
-        "total_workloads": total,
-        "breakdown": {
-            "vm_no_cont_workloads": vm_no_cont_workloads,
-            "vm_with_cont_workloads": vm_with_cont_workloads,
-            "caas_workloads": caas_workloads,
-            "serverless_workloads": serverless_workloads,
-            "buckets_workloads": buckets_workloads,
-            "paas_db_workloads": paas_db_workloads
-        }
     }
+    total_assets = sum(counts.values())
+
+    if args.output == "table" and args.details:
+        account = f'{account_info["Id"]} ({account_info["Name"]})' if account_info else cloud
+        print(f"\n--- Assets: {account} ---")
+        for key, label in ASSET_CATEGORIES:
+            print(f"{label:<40} {counts[key]}")
+        shown = "not collected (use --count-images)" if container_images is None else container_images
+        free_image_scans = (vm_no_containers + vm_with_containers + caas) * 10
+        print(f"{'Container Images':<40} {shown} (free quota: {free_image_scans} scans)")
+        print(f"{'TOTAL ASSETS':<40} {total_assets}\n{separator}")
+
+    return {
+        "cloud": cloud,
+        "account_id": account_info["Id"] if account_info else "N/A",
+        "account_name": account_info["Name"] if account_info else "N/A",
+        **counts,
+        "container_images": container_images,
+        "total_assets": total_assets,
+    }
+
+
+def global_sku(results):
+    """
+    Sum the raw assets across the whole estate, then apply the divisors ONCE.
+
+    Returns (totals, skus):
+      totals -- {category: asset count} plus 'total_assets' and 'container_images'
+      skus   -- {package_key: {'label':…, 'units': {category: n}, 'total': n}}
+    """
+    totals = {key: sum(int(r.get(key) or 0) for r in results) for key, _ in ASSET_CATEGORIES}
+    totals["total_assets"] = sum(totals[key] for key, _ in ASSET_CATEGORIES)
+    collected = [r["container_images"] for r in results if r.get("container_images") is not None]
+    totals["container_images"] = sum(collected) if collected else None
+    totals["accounts"] = len(results)
+
+    skus = {}
+    for key, label, excluded in CC_PACKAGES:
+        units = {cat: (0 if cat in excluded else math.ceil(totals[cat] / cc_metering[cat]))
+                 for cat, _ in ASSET_CATEGORIES}
+        skus[key] = {"label": label, "excluded": sorted(excluded),
+                     "units": units, "total": sum(units.values())}
+    return totals, skus
 
 
 def _rank_key(row):
     """Biggest first, then by id so two runs of the same estate produce identical files."""
-    return (-row["total_workloads"], str(row["account_id"]))
+    return (-row["total_assets"], str(row["account_id"]))
 
 
 CSV_COLUMNS = ["cloud", "account_id", "account_name", "vm_no_containers", "vm_with_containers",
-               "caas", "serverless", "buckets", "paas_db", "container_images", "total_workloads"]
+               "caas", "serverless", "buckets", "paas_db", "container_images", "total_assets"]
 
 
-def write_csv(results):
+def _csv_footer_rows(totals, skus):
+    """
+    The rows appended under the per-account data: estate-wide asset totals, the
+    divisor used for each category, then one SKU row per Cortex Cloud package.
+    Same columns as the data rows so the file stays rectangular for a spreadsheet.
+    """
+    rows = [{k: "" for k in CSV_COLUMNS}]  # blank separator row
+
+    assets = {"cloud": "== TOTAL ASSETS ==", "account_id": "ALL",
+              "account_name": f"{totals['accounts']} accounts/subscriptions/projects",
+              "container_images": "" if totals["container_images"] is None else totals["container_images"],
+              "total_assets": totals["total_assets"]}
+    assets.update({cat: totals[cat] for cat, _ in ASSET_CATEGORIES})
+    rows.append(assets)
+
+    divisors = {"cloud": "== METERING DIVISOR ==", "account_id": "",
+                "account_name": "assets per billable unit", "container_images": "free", "total_assets": ""}
+    divisors.update({cat: cc_metering[cat] for cat, _ in ASSET_CATEGORIES})
+    rows.append(divisors)
+
+    for key, _label, _excluded in CC_PACKAGES:
+        sku = skus[key]
+        note = sku["label"]
+        if sku["excluded"]:
+            note += " (" + ", ".join(sku["excluded"]) + " not metered)"
+        row = {"cloud": f"== SKU {key} ==", "account_id": key, "account_name": note,
+               "container_images": "", "total_assets": sku["total"]}
+        row.update(sku["units"])
+        rows.append(row)
+    return rows
+
+
+def write_csv(results, totals, skus):
     handle = open(args.csv_file, "w", newline="", encoding="utf-8") if args.csv_file else sys.stdout
     try:
         writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS, extrasaction="ignore")
         writer.writeheader()
         for r in sorted(results, key=_rank_key):
             writer.writerow(r)
+        for r in _csv_footer_rows(totals, skus):
+            writer.writerow(r)
     finally:
         if args.csv_file:
             handle.close()
-            warn(f"Wrote {len(results)} rows to {args.csv_file}")
+            warn(f"Wrote {len(results)} rows + totals/SKU footer to {args.csv_file}")
 
 
-def print_global_summary(results):
+def _n(value):
+    """Thousands separators, because six-figure asset counts are unreadable raw."""
+    return f"{value:,}".replace(",", " ")
+
+
+def _print_account_table(ranked):
+    """Per-account asset counts. Opt-in via --details; the CSV always has them all."""
+    limit = len(ranked) if args.top <= 0 else min(args.top, len(ranked))
+    print(f"\n{'ASSETS PER ACCOUNT/SUBSCRIPTION/PROJECT':^120}")
+    if limit < len(ranked):
+        print(f"{'(top ' + str(limit) + ' of ' + str(len(ranked)) + ' -- use --top 0 or --csv-file for all)':^120}")
+    print(f"{'-' * 120}")
+    print(f"{'Cloud':<8} {'Account/Subscription/Project ID':<42} {'Account Name':<30} {'Assets':>12}")
+    print(f"{'-' * 120}")
+    for r in ranked[:limit]:
+        name = r['account_name'] or ""
+        name = (name[:27] + '...') if len(name) > 30 else name
+        print(f"{r['cloud']:<8} {str(r['account_id'])[:42]:<42} {name:<30} {_n(r['total_assets']):>12}")
+    if limit < len(ranked):
+        remainder = sum(r["total_assets"] for r in ranked[limit:])
+        print(f"{'...':<8} {str(len(ranked) - limit) + ' more accounts':<42} {'':<30} {_n(remainder):>12}")
+    print(f"{'-' * 120}")
+
+
+def print_global_summary(results, totals, skus):
     """
-    Display a global summary table with the total SKUs per account/subscription/project.
-    On large estates only the top N rows are printed; the grand total always covers everything.
+    On-screen report: estate-wide ASSET totals only. SKUs are deliberately kept
+    out of the terminal (they live in the CSV footer) so the number people read
+    off the screen is the raw inventory, not a licence estimate -- pass
+    --show-sku when the licence figure is what is wanted.
     """
     if not results:
         print("\nNo account/subscription/project returned any data.")
         return 0
 
     ranked = sorted(results, key=_rank_key)
-    limit = len(ranked) if args.top <= 0 else min(args.top, len(ranked))
-    empty = sum(1 for r in ranked if r["total_workloads"] == 0)
 
     print(f"\n\n{'=' * 120}")
-    print(f"{'GLOBAL SKU SUMMARY - ALL ACCOUNTS/SUBSCRIPTIONS/PROJECTS':^120}")
+    print(f"{'GLOBAL ASSET SUMMARY - ALL ACCOUNTS/SUBSCRIPTIONS/PROJECTS':^120}")
     print(f"{'=' * 120}")
-    if limit < len(ranked):
-        print(f"{'(top ' + str(limit) + ' of ' + str(len(ranked)) + ' by SKU -- use --top 0 or --output csv for all)':^120}")
-    print(f"{'Cloud':<15} {'Account/Subscription/Project ID':<45} {'Account Name':<35} {'SKU':<10}")
+
+    if args.details:
+        _print_account_table(ranked)
+
+    print(f"\n{'Asset Category':<55} {'Assets':>15}")
+    print(f"{'-' * 120}")
+    for key, label in ASSET_CATEGORIES:
+        print(f"{label:<55} {_n(totals[key]):>15}")
+    if totals["container_images"] is not None:
+        print(f"{'Container Images (free quota, informational)':<55} {_n(totals['container_images']):>15}")
     print(f"{'-' * 120}")
 
-    total_sku = 0
+    # Per-cloud subtotals, only worth printing on a multi-provider run.
     cloud_totals = {}
-
-    for result in ranked:
-        cloud = result['cloud']
-        sku = result['total_workloads']
-        total_sku += sku
-        cloud_totals[cloud] = cloud_totals.get(cloud, 0) + sku
-
-    for result in ranked[:limit]:
-        account_name = result['account_name'] or ""
-        # Truncate names that are too long
-        account_name_display = (account_name[:32] + '...') if len(account_name) > 35 else account_name
-        print(f"{result['cloud']:<15} {result['account_id']:<45} {account_name_display:<35} "
-              f"{result['total_workloads']:<10}")
-
-    if limit < len(ranked):
-        remainder = sum(r["total_workloads"] for r in ranked[limit:])
-        print(f"{'...':<15} {str(len(ranked) - limit) + ' more accounts':<45} {'':<35} {remainder:<10}")
-    print(f"{'-' * 120}")
-
-    # Subtotals by cloud
+    for r in ranked:
+        cloud_totals[r['cloud']] = cloud_totals.get(r['cloud'], 0) + r['total_assets']
     if len(cloud_totals) > 1:
-        print(f"\n{'SUBTOTALS BY CLOUD PROVIDER':^120}")
-        print(f"{'-' * 120}")
-        for cloud, subtotal in cloud_totals.items():
-            print(f"{cloud:<15} {'Subtotal':<80} {subtotal:<10}")
+        for cloud, subtotal in sorted(cloud_totals.items()):
+            print(f"{'Subtotal ' + cloud:<55} {_n(subtotal):>15}")
         print(f"{'-' * 120}")
 
-    print(f"\n{'Accounts scanned':<95} {len(ranked):<10}")
-    print(f"{'Accounts with 0 SKU':<95} {empty:<10}")
+    empty = sum(1 for r in ranked if r["total_assets"] == 0)
+    print(f"{'Accounts/subscriptions/projects scanned':<55} {_n(len(ranked)):>15}")
+    print(f"{'  of which empty (0 asset)':<55} {_n(empty):>15}")
     if _API_FAILURES:
-        services = ", ".join(sorted(_API_FAILURES))
-        print(f"{'GRAND TOTAL (INCOMPLETE - see PARTIAL COVERAGE above)':<95} {total_sku:<10}")
-        print(f"{'  not fully readable: ' + services:<95}")
+        print(f"{'GRAND TOTAL ASSETS (INCOMPLETE - see PARTIAL COVERAGE above)':<55} {_n(totals['total_assets']):>15}")
+        print(f"  not fully readable: {', '.join(sorted(_API_FAILURES))}")
     else:
-        print(f"{'GRAND TOTAL':<95} {total_sku:<10}")
-    print(f"{'=' * 120}\n")
+        print(f"{'GRAND TOTAL ASSETS':<55} {_n(totals['total_assets']):>15}")
+    print(f"{'=' * 120}")
 
-    return total_sku
+    if args.show_sku:
+        print_sku_summary(totals, skus)
+    elif args.csv_file:
+        print(f"Billable units per Cortex Cloud package: see the footer of {args.csv_file}"
+              f" (or re-run with --show-sku).\n")
+    else:
+        print("Billable units per Cortex Cloud package: re-run with --show-sku or --csv-file.\n")
+
+    return totals["total_assets"]
+
+
+def print_sku_summary(totals, skus):
+    """Global billable units, one column per Cortex Cloud package. Opt-in (--show-sku)."""
+    labels = [skus[key]["label"] for key, _, _ in CC_PACKAGES]
+    print(f"\n{'=' * 120}")
+    print(f"{'GLOBAL BILLABLE UNITS (SKU) - COMPUTED ON ESTATE-WIDE TOTALS, NOT PER ACCOUNT':^120}")
+    print(f"{'=' * 120}")
+    header = f"{'Asset Category':<40} {'Assets':>12} {'Divisor':>9}"
+    for label in labels:
+        header += f" {label:>26}"
+    print(header)
+    print(f"{'-' * 120}")
+    for cat, label in ASSET_CATEGORIES:
+        line = f"{label:<40} {_n(totals[cat]):>12} {cc_metering[cat]:>9}"
+        for key, _, excluded in CC_PACKAGES:
+            line += f" {('not metered' if cat in excluded else _n(skus[key]['units'][cat])):>26}"
+        print(line)
+    print(f"{'-' * 120}")
+    total_line = f"{'TOTAL BILLABLE UNITS':<40} {'':>12} {'':>9}"
+    for key, _, _ in CC_PACKAGES:
+        total_line += f" {_n(skus[key]['total']):>26}"
+    print(total_line)
+    print(f"{'=' * 120}\n")
 
 
 def emit(results):
     """Single exit point for every provider."""
+    totals, skus = global_sku(results)
     # --csv-file always produces the full file, whatever is rendered on screen,
     # so a run can show the summary AND leave a deliverable behind.
     if args.csv_file:
-        write_csv(results)
+        write_csv(results, totals, skus)
     if args.output == "json":
-        print(json.dumps(results, indent=2))
+        print(json.dumps({"accounts": results, "asset_totals": totals, "sku": skus}, indent=2))
     elif args.output == "csv":
         if not args.csv_file:
-            write_csv(results)
+            write_csv(results, totals, skus)
     else:
-        print_global_summary(results)
+        print_global_summary(results, totals, skus)
 
 
 # ---------------------------- AWS ----------------------------
